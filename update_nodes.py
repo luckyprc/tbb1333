@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（DNS并发版）
-- DNS解析+TCP测试 合并为单线程任务，64线程并发
-- DNS解析单独设置2秒超时（防卡死）
-- 无HTTP检测
-- 地域硬过滤
+节点聚合器（精简源站版）
+- 删除失效源站，只保留有数据的
+- 新增 node.freeclashnode.com 0-4 号节点池
+- DNS+TCP 64线程并发
 - 明文输出
 """
 
@@ -30,7 +29,7 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "v2ray.txt")
 
 TCP_LATENCY_THRESHOLD = 599
 TCP_TIMEOUT = 2
-DNS_TIMEOUT = 2          # DNS解析最多2秒
+DNS_TIMEOUT = 2
 MAX_WORKERS = 64
 
 ALLOWED_CC = {
@@ -76,28 +75,13 @@ ALLOWED_TLDS = set("""
 .ir .ps .sy .af .bt .mv
 """.split())
 
+# 只保留有数据的源站（根据日志筛选）
 SOURCES = [
     "http://comm.cczzuu.top/node/{date}-v2ray.txt",
     "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity",
     "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/EternityAir",
-    "https://raw.githubusercontent.com/pojiezhiyuanjun/freev2/master/{date}.txt",
-    "https://raw.githubusercontent.com/Fukki-Z/nodefree/main/{date}.txt",
-    "https://raw.githubusercontent.com/FiFier/v2rayShare/main/{date}.txt",
-    "https://raw.githubusercontent.com/colatiger/v2ray-nodes/master/{date}.txt",
-    "https://raw.githubusercontent.com/ssrsub/ssr/master/{date}.txt",
-    "https://raw.githubusercontent.com/iwxf/free-v2ray/master/{date}.txt",
-    "https://raw.githubusercontent.com/ldir92664/Vmess-Actions/main/{date}.txt",
-    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/{date}.txt",
-    "https://raw.githubusercontent.com/wrfree/free/main/{date}.txt",
-    "https://raw.githubusercontent.com/anaer/Sub/main/{date}.txt",
-    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
     "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
-    "https://raw.githubusercontent.com/misersun/config003/main/{date}.txt",
-    "https://clash.221207.xyz/pubclashyaml",
     "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
-    "https://raw.githubusercontent.com/jikelonglie/meskell/master/{date}.txt",
-    "https://raw.githubusercontent.com/MOnday9907/v2ray/master/{date}.txt",
-    "https://raw.githubusercontent.com/Jia-Pingwa/free-v2ray-merge/master/{date}.txt",
 ]
 
 DATE_FMT = "%Y%m%d"
@@ -189,7 +173,6 @@ def extract_port_from_node(node_url: str) -> Optional[int]:
 
 
 def get_ip_from_host(host: str) -> Optional[str]:
-    """DNS解析，带2秒超时保护"""
     if not host:
         return None
     if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host):
@@ -313,24 +296,27 @@ def parse_subscribe_content(text: str) -> List[str]:
 
 def get_source_urls() -> List[str]:
     today = get_today_str()
-    return [src.replace("{date}", today) for src in SOURCES]
+    year = time.strftime("%Y", time.localtime())
+    month = time.strftime("%m", time.localtime())
+    
+    urls = [src.replace("{date}", today) for src in SOURCES]
+    
+    # 添加 freeclashnode 0-4 号池
+    for i in range(5):
+        urls.append(f"https://node.freeclashnode.com/uploads/{year}/{month}/{i}-{today}.txt")
+    
+    return urls
 
 
 def process_single_node(node: str) -> Optional[Tuple[str, float, str, Optional[str]]]:
-    """
-    单节点完整处理：提取host/port -> DNS解析 -> TCP测试
-    返回: (node, latency, host, ip) 或 None
-    """
     host = extract_host_from_node(node)
     port = extract_port_from_node(node)
     if not host or not port:
         return None
     
-    # DNS解析（2秒超时）
     ip = get_ip_from_host(host)
     target = ip or host
     
-    # TCP测试（2秒超时）
     lat = tcp_latency_test(target, port)
     if lat is None:
         return None
@@ -345,13 +331,18 @@ def main():
         today = get_today_str()
         print(f"=== Start | {today} ===")
 
-        # 1. 抓取源站
+        # 1. 抓取
         all_nodes: List[str] = []
         for url in get_source_urls():
+            print(f"[FETCH] {url}")
             content = fetch_url(url)
             if content:
-                all_nodes.extend(parse_subscribe_content(content))
-        
+                nodes = parse_subscribe_content(content)
+                print(f"  -> Got {len(nodes)} nodes")
+                all_nodes.extend(nodes)
+            else:
+                print(f"  -> Failed or empty")
+
         print(f"[1] Fetch: {len(all_nodes)}")
         if not all_nodes:
             open(OUTPUT_FILE, "w").close()
@@ -371,10 +362,10 @@ def main():
         
         print(f"[2] Dedup: {len(unique_nodes)}")
 
-        # 3. 并发：DNS解析 + TCP测试（64线程，彻底消灭串行瓶颈）
+        # 3. 并发 DNS+TCP
         tcp_passed: List[Tuple[str, float, str, Optional[str]]] = []
         
-        print(f"[3] Testing {len(unique_nodes)} nodes (workers={MAX_WORKERS})...")
+        print(f"[3] Testing {len(unique_nodes)} nodes...")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(process_single_node, node): node for node in unique_nodes}
             for future in as_completed(futures):
