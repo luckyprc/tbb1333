@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（纯TLD极速版）
-- 无GeoIP查询，无ip-api.com
-- TLD硬规则：明确放行/封禁，其余.com/.net/.org等通用后缀直接放行
+节点聚合器（剔除IP直连版）
+- 剔除纯IP地址节点（TLS无SNI，大概率报错）
+- 无GeoIP查询，纯TLD硬规则
 - DNS+TCP 64线程并发
-- 目标：10-15秒完成
+- 保留美国/日本/新加坡/德国/亚洲（不含CN）
+- 明文输出
 """
 
 import base64
@@ -172,7 +173,7 @@ def check_tld(host: str) -> bool:
     TLD硬规则：
     - 命中BLOCKED → False（丢弃）
     - 命中ALLOWED → True（放行）
-    - 其余.com/.net/.org/.xyz/.cloud/.top/.world/.ltd等通用后缀 → True（放行，保留美国节点）
+    - 其余.com/.net/.org/.xyz/.cloud/.top/.world/.ltd等通用后缀 → True（放行）
     """
     if not host:
         return False
@@ -183,7 +184,6 @@ def check_tld(host: str) -> bool:
     for tld in ALLOWED_TLDS:
         if h.endswith(tld):
             return True
-    # 通用后缀（.com/.net/.org/.xyz/.cloud/.shop/.online/.live/.site/.space等）直接放行
     return True
 
 
@@ -262,12 +262,18 @@ def get_source_urls() -> List[str]:
 def process_single_node(node: str) -> Optional[Tuple[str, float, str]]:
     """
     DNS解析 -> TCP测试
+    关键：剔除纯IP地址节点（TLS无SNI，大概率报错）
     返回: (node, latency, host) 或 None
     """
     host = extract_host_from_node(node)
     port = extract_port_from_node(node)
     if not host or not port:
         return None
+    
+    # 剔除纯IP直连节点：TLS握手需要域名（SNI），IP直连无SNI，大概率TLS错误
+    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host):
+        return None
+    
     ip = get_ip_from_host(host)
     target = ip or host
     lat = tcp_latency_test(target, port)
@@ -309,8 +315,10 @@ def main():
         
         print(f"[2] Dedup: {len(unique_nodes)}", flush=True)
 
-        # 3. 并发DNS+TCP
+        # 3. 并发DNS+TCP（自动剔除IP直连节点）
         tcp_passed: List[Tuple[str, float, str]] = []
+        ip_dropped = 0
+        
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(process_single_node, node): node for node in unique_nodes}
             for future in as_completed(futures):
@@ -318,25 +326,27 @@ def main():
                     result = future.result()
                     if result:
                         tcp_passed.append(result)
+                    else:
+                        ip_dropped += 1
                 except Exception:
                     pass
         
-        print(f"[3] TCP ok: {len(tcp_passed)}", flush=True)
+        print(f"[3] TCP ok: {len(tcp_passed)} | IP-dropped: {ip_dropped}", flush=True)
         if not tcp_passed:
             open(OUTPUT_FILE, "w").close()
             return
 
-        # 4. 纯TLD硬过滤（无GeoIP，无ip-api.com）
+        # 4. 纯TLD硬过滤（无GeoIP）
         allowed_nodes: List[Tuple[str, float]] = []
-        dropped = 0
+        tld_dropped = 0
         
         for node, lat, host in tcp_passed:
             if check_tld(host):
                 allowed_nodes.append((node, lat))
             else:
-                dropped += 1
+                tld_dropped += 1
         
-        print(f"[4] TLD pass: {len(allowed_nodes)} | dropped: {dropped}", flush=True)
+        print(f"[4] TLD pass: {len(allowed_nodes)} | TLD-dropped: {tld_dropped}", flush=True)
 
         # 5. 输出（按TCP延迟升序）
         if allowed_nodes:
