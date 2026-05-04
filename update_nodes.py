@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（语法修正版）
+节点聚合器（DNS并发版）
+- DNS解析+TCP测试 合并为单线程任务，64线程并发
+- DNS解析单独设置2秒超时（防卡死）
+- 无HTTP检测
+- 地域硬过滤
+- 明文输出
 """
 
 import base64
@@ -24,9 +29,8 @@ OUTPUT_DIR = "output"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "v2ray.txt")
 
 TCP_LATENCY_THRESHOLD = 599
-HTTP_LATENCY_THRESHOLD = 599
-HTTP_CHECK_URL = "http://connectivitycheck.platform.hicloud.com/generate_204"
-TCP_TIMEOUT = 3
+TCP_TIMEOUT = 2
+DNS_TIMEOUT = 2          # DNS解析最多2秒
 MAX_WORKERS = 64
 
 ALLOWED_CC = {
@@ -50,7 +54,6 @@ ALLOWED_CNAMES = {
     "British Indian Ocean Territory", "Germany", "France"
 }
 
-# 用字符串 split 生成集合，彻底避开多行括号匹配问题
 BLOCKED_TLDS = set("""
 .uk .co.uk .gb .us .ca .au .nz .ru .ua .by
 .nl .it .es .pl .se .no .fi .dk .ch .at .be
@@ -115,9 +118,8 @@ def fetch_url(url: str, retries: int = 2) -> Optional[str]:
             resp = requests.get(url, headers=headers, timeout=15)
             if resp.status_code == 200:
                 return resp.text
-        except Exception as e:
+        except Exception:
             if attempt == retries:
-                print(f"[ERR] Fetch failed: {url} -> {e}")
                 return None
             time.sleep(1)
     return None
@@ -187,14 +189,19 @@ def extract_port_from_node(node_url: str) -> Optional[int]:
 
 
 def get_ip_from_host(host: str) -> Optional[str]:
+    """DNS解析，带2秒超时保护"""
     if not host:
         return None
     if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host):
         return host
+    old = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(DNS_TIMEOUT)
     try:
         return socket.gethostbyname(host)
     except Exception:
         return None
+    finally:
+        socket.setdefaulttimeout(old)
 
 
 def check_tld(host: str) -> Optional[bool]:
@@ -259,18 +266,6 @@ def tcp_latency_test(host: str, port: int) -> Optional[float]:
         return None
 
 
-def http_latency_test() -> Optional[float]:
-    try:
-        start = time.time()
-        resp = requests.get(HTTP_CHECK_URL, timeout=5)
-        elapsed = (time.time() - start) * 1000
-        if resp.status_code == 204 and elapsed < HTTP_LATENCY_THRESHOLD:
-            return round(elapsed, 2)
-        return None
-    except Exception:
-        return None
-
-
 def parse_subscribe_content(text: str) -> List[str]:
     nodes = []
     if not text:
@@ -311,8 +306,8 @@ def parse_subscribe_content(text: str) -> List[str]:
                     nodes.append(f"ss://{userinfo}@{p.get('server')}:{p.get('port')}")
                 elif proto == "trojan":
                     nodes.append(f"trojan://{p.get('password')}@{p.get('server')}:{p.get('port')}?sni={p.get('sni', '')}")
-        except Exception as e:
-            print(f"[WARN] YAML parse error: {e}")
+        except Exception:
+            pass
     return nodes
 
 
@@ -321,28 +316,44 @@ def get_source_urls() -> List[str]:
     return [src.replace("{date}", today) for src in SOURCES]
 
 
+def process_single_node(node: str) -> Optional[Tuple[str, float, str, Optional[str]]]:
+    """
+    单节点完整处理：提取host/port -> DNS解析 -> TCP测试
+    返回: (node, latency, host, ip) 或 None
+    """
+    host = extract_host_from_node(node)
+    port = extract_port_from_node(node)
+    if not host or not port:
+        return None
+    
+    # DNS解析（2秒超时）
+    ip = get_ip_from_host(host)
+    target = ip or host
+    
+    # TCP测试（2秒超时）
+    lat = tcp_latency_test(target, port)
+    if lat is None:
+        return None
+    
+    return (node, lat, host, ip)
+
+
 def main():
     try:
         t_start = time.time()
         ensure_dir(OUTPUT_DIR)
         today = get_today_str()
-        print(f"=== Node Aggregator Started | Date: {today} ===")
+        print(f"=== Start | {today} ===")
 
-        # 1. 抓取
+        # 1. 抓取源站
         all_nodes: List[str] = []
         for url in get_source_urls():
-            print(f"[FETCH] {url}")
             content = fetch_url(url)
             if content:
-                nodes = parse_subscribe_content(content)
-                print(f"  -> Got {len(nodes)} nodes")
-                all_nodes.extend(nodes)
-            else:
-                print(f"  -> Failed or empty")
-
-        print(f"[INFO] Total raw nodes: {len(all_nodes)}")
+                all_nodes.extend(parse_subscribe_content(content))
+        
+        print(f"[1] Fetch: {len(all_nodes)}")
         if not all_nodes:
-            print("[WARN] No nodes fetched, aborting.")
             open(OUTPUT_FILE, "w").close()
             return
 
@@ -357,107 +368,73 @@ def main():
             if fp not in seen and host and port:
                 seen.add(fp)
                 unique_nodes.append(node)
-        print(f"[INFO] After dedup: {len(unique_nodes)}")
+        
+        print(f"[2] Dedup: {len(unique_nodes)}")
 
-        # 3. TCP 延迟测试
-        tcp_passed: List[Tuple[str, float]] = []
-        node_meta = []
-        for node in unique_nodes:
-            host = extract_host_from_node(node)
-            port = extract_port_from_node(node)
-            ip = get_ip_from_host(host) if host else None
-            if host and port:
-                node_meta.append((node, host, ip, port))
-
-        print(f"[TEST] TCP latency testing {len(node_meta)} nodes...")
+        # 3. 并发：DNS解析 + TCP测试（64线程，彻底消灭串行瓶颈）
+        tcp_passed: List[Tuple[str, float, str, Optional[str]]] = []
+        
+        print(f"[3] Testing {len(unique_nodes)} nodes (workers={MAX_WORKERS})...")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_map = {}
-            for node, host, ip, port in node_meta:
-                target = ip or host
-                future = executor.submit(tcp_latency_test, target, port)
-                future_map[future] = (node, host, ip, port)
-            for future in as_completed(future_map):
-                node, host, ip, port = future_map[future]
+            futures = {executor.submit(process_single_node, node): node for node in unique_nodes}
+            for future in as_completed(futures):
                 try:
-                    lat = future.result()
-                    if lat is not None:
-                        tcp_passed.append((node, lat))
-                    else:
-                        print(f"  [DROP-TCP] {host}:{port}")
-                except Exception as e:
-                    print(f"  [ERR-TCP] {host}:{port} -> {e}")
-
-        print(f"[INFO] After TCP latency filter: {len(tcp_passed)}")
+                    result = future.result()
+                    if result:
+                        tcp_passed.append(result)
+                except Exception:
+                    pass
+        
+        print(f"[3] TCP ok: {len(tcp_passed)}")
         if not tcp_passed:
-            print("[WARN] No nodes passed TCP latency test.")
             open(OUTPUT_FILE, "w").close()
             return
 
-        # 4. HTTP 延迟门槛（失败不阻断）
-        print(f"[TEST] HTTP check...")
-        http_lat = http_latency_test()
-        if http_lat is None:
-            print(f"[WARN] HTTP check failed. Continuing anyway...")
-        else:
-            print(f"[OK] HTTP baseline: {http_lat}ms")
-
-        # 5. 地域过滤
-        print(f"[GEO] Filtering regions...")
-        
+        # 4. 地域过滤
         allowed_nodes: List[Tuple[str, float]] = []
-        pending_nodes: List[Tuple[str, float, str, Optional[str]]] = []
+        pending: List[Tuple[str, float, str, Optional[str]]] = []
         
-        for node, tcp_lat in tcp_passed:
-            host = extract_host_from_node(node)
+        for node, lat, host, ip in tcp_passed:
             tld_result = check_tld(host)
             if tld_result is True:
-                allowed_nodes.append((node, tcp_lat))
+                allowed_nodes.append((node, lat))
                 continue
             elif tld_result is False:
                 continue
-            
-            ip = get_ip_from_host(host) if host else None
-            pending_nodes.append((node, tcp_lat, host or "?", ip))
+            pending.append((node, lat, host, ip))
         
-        if pending_nodes:
-            print(f"[GEO-IP] Querying {len(pending_nodes)} IPs...")
-            region_cache: Dict[str, Optional[Dict]] = {}
-            
-            for node, tcp_lat, host, ip in pending_nodes:
+        if pending:
+            print(f"[4] GeoIP: {len(pending)} pending...")
+            cache: Dict[str, Optional[Dict]] = {}
+            for node, lat, host, ip in pending:
                 if not ip:
                     continue
-                
-                if ip in region_cache:
-                    data = region_cache[ip]
-                else:
+                data = cache.get(ip)
+                if data is None and ip not in cache:
                     data = query_ip_region(ip)
-                    region_cache[ip] = data
-                    time.sleep(0.5)
-                
+                    cache[ip] = data
                 if data and is_allowed_region(data):
-                    allowed_nodes.append((node, tcp_lat))
+                    allowed_nodes.append((node, lat))
         
-        print(f"[INFO] After region filter: {len(allowed_nodes)}")
+        print(f"[4] Region ok: {len(allowed_nodes)}")
 
-        # 6. 输出
+        # 5. 输出
         if allowed_nodes:
             allowed_nodes.sort(key=lambda x: x[1])
             node_text = "\n".join([n for n, _ in allowed_nodes])
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 f.write(node_text)
-            print(f"[OK] Output: {OUTPUT_FILE} | {len(allowed_nodes)} nodes")
+            print(f"[OK] Output: {len(allowed_nodes)} nodes")
         else:
-            print("[WARN] No nodes in allowed regions. Writing TCP-passed nodes as fallback.")
             tcp_passed.sort(key=lambda x: x[1])
-            node_text = "\n".join([n for n, _ in tcp_passed])
+            node_text = "\n".join([n for n, _, _, _ in tcp_passed])
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 f.write(node_text)
-            print(f"[OK] Fallback output: {OUTPUT_FILE} | {len(tcp_passed)} nodes")
+            print(f"[OK] Fallback: {len(tcp_passed)} nodes")
 
-        print(f"[DONE] Total time: {round(time.time() - t_start, 1)}s")
+        print(f"[DONE] {round(time.time() - t_start, 1)}s")
         
-    except Exception as e:
-        print(f"\n[FATAL] Unhandled exception: {e}")
+    except Exception:
         traceback.print_exc()
         sys.exit(1)
 
