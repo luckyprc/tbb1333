@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（诊断版）
-- 增加详细过滤日志
-- 增加保底机制：如果全部过滤为空，输出原始去重节点（方便排查）
+节点聚合器（400ms 宽松版）
+- TCP 延迟 <400ms
+- HTTP 延迟 <400ms
+- 其余逻辑不变
 """
 
 import base64
@@ -23,14 +24,11 @@ import yaml
 OUTPUT_DIR = "output"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "v2ray.txt")
 
-# ========== 诊断开关 ==========
-# 设为 True 则保留所有节点（只去重），用于确认源站是否有数据
-DEBUG_SKIP_ALL_FILTERS = False
-
-TCP_LATENCY_THRESHOLD = 250
-HTTP_LATENCY_THRESHOLD = 250
+# ========== 延迟阈值：400ms ==========
+TCP_LATENCY_THRESHOLD = 400
+HTTP_LATENCY_THRESHOLD = 400
 HTTP_CHECK_URL = "http://connectivitycheck.platform.hicloud.com/generate_204"
-TCP_TIMEOUT = 3
+TCP_TIMEOUT = 5          # 同步放宽 TCP 超时到 5 秒
 MAX_WORKERS = 64
 IP_QUERY_DELAY = 1.5
 
@@ -266,7 +264,7 @@ def tcp_latency_test(host: str, port: int) -> Optional[float]:
 def http_latency_test() -> Optional[float]:
     try:
         start = time.time()
-        resp = requests.get(HTTP_CHECK_URL, timeout=5)
+        resp = requests.get(HTTP_CHECK_URL, timeout=8)  # 超时也放宽到 8 秒
         elapsed = (time.time() - start) * 1000
         if resp.status_code == 204 and elapsed < HTTP_LATENCY_THRESHOLD:
             return round(elapsed, 2)
@@ -327,10 +325,6 @@ def main():
     today = get_today_str()
     print(f"=== Node Aggregator Started | Date: {today} ===")
 
-    # 调试模式：跳过所有过滤，只保留去重
-    if DEBUG_SKIP_ALL_FILTERS:
-        print("[DEBUG] DEBUG_SKIP_ALL_FILTERS = True, skipping all filters!")
-
     # 1. 抓取
     all_nodes: List[str] = []
     for url in get_source_urls():
@@ -362,14 +356,6 @@ def main():
             unique_nodes.append(node)
     print(f"[INFO] After dedup: {len(unique_nodes)}")
 
-    # 调试模式：直接输出去重后的节点
-    if DEBUG_SKIP_ALL_FILTERS:
-        node_text = "\n".join(unique_nodes)
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            f.write(node_text)
-        print(f"[DEBUG] Output {len(unique_nodes)} nodes without filtering.")
-        return
-
     # 3. TCP 延迟测试
     tcp_passed: List[Tuple[str, float]] = []
     node_meta = []
@@ -398,10 +384,7 @@ def main():
     print(f"[INFO] After TCP latency filter: {len(tcp_passed)}")
     if not tcp_passed:
         print("[WARN] No nodes passed TCP latency test.")
-        # 保底：输出去重节点供排查
-        print("[FALLBACK] Writing deduped nodes for diagnosis...")
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            f.write("\n".join([n for n in unique_nodes]))
+        open(OUTPUT_FILE, "w").close()
         return
 
     # 4. HTTP 延迟门槛
@@ -409,9 +392,7 @@ def main():
     http_lat = http_latency_test()
     if http_lat is None:
         print(f"[WARN] HTTP check failed (runner to hicloud >{HTTP_LATENCY_THRESHOLD}ms or timeout).")
-        print("[FALLBACK] Writing TCP-passed nodes for diagnosis...")
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            f.write("\n".join([n for n, _ in tcp_passed]))
+        open(OUTPUT_FILE, "w").close()
         return
     print(f"[OK] HTTP baseline: {http_lat}ms")
 
@@ -473,9 +454,7 @@ def main():
         print(f"[OK] Output: {OUTPUT_FILE} | {len(allowed_nodes)} nodes")
     else:
         print("[WARN] No nodes in allowed regions.")
-        print("[FALLBACK] Writing TCP-passed nodes for diagnosis...")
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            f.write("\n".join([n for n, _ in tcp_passed]))
+        open(OUTPUT_FILE, "w").close()
 
 
 if __name__ == "__main__":
