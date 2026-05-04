@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（400ms 宽松版）
-- TCP 延迟 <400ms
-- HTTP 延迟 <400ms
-- 其余逻辑不变
+节点聚合器（599ms 保底版）
+- TCP 延迟 <599ms
+- HTTP 延迟 <599ms（失败不阻断，仅警告）
+- IP 地域硬过滤（亚洲【不含CN】、德国、法国）
+- 输出明文订阅
 """
 
 import base64
@@ -24,11 +25,11 @@ import yaml
 OUTPUT_DIR = "output"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "v2ray.txt")
 
-# ========== 延迟阈值：400ms ==========
-TCP_LATENCY_THRESHOLD = 400
-HTTP_LATENCY_THRESHOLD = 400
+# ========== 延迟阈值：599ms ==========
+TCP_LATENCY_THRESHOLD = 599
+HTTP_LATENCY_THRESHOLD = 599
 HTTP_CHECK_URL = "http://connectivitycheck.platform.hicloud.com/generate_204"
-TCP_TIMEOUT = 5          # 同步放宽 TCP 超时到 5 秒
+TCP_TIMEOUT = 8          # 同步放宽到 8 秒
 MAX_WORKERS = 64
 IP_QUERY_DELAY = 1.5
 
@@ -264,7 +265,7 @@ def tcp_latency_test(host: str, port: int) -> Optional[float]:
 def http_latency_test() -> Optional[float]:
     try:
         start = time.time()
-        resp = requests.get(HTTP_CHECK_URL, timeout=8)  # 超时也放宽到 8 秒
+        resp = requests.get(HTTP_CHECK_URL, timeout=10)  # 放宽到 10 秒
         elapsed = (time.time() - start) * 1000
         if resp.status_code == 204 and elapsed < HTTP_LATENCY_THRESHOLD:
             return round(elapsed, 2)
@@ -387,14 +388,14 @@ def main():
         open(OUTPUT_FILE, "w").close()
         return
 
-    # 4. HTTP 延迟门槛
+    # 4. HTTP 延迟门槛 —— 失败不阻断，仅警告
     print(f"[TEST] HTTP check ({HTTP_CHECK_URL}, threshold {HTTP_LATENCY_THRESHOLD}ms)...")
     http_lat = http_latency_test()
     if http_lat is None:
         print(f"[WARN] HTTP check failed (runner to hicloud >{HTTP_LATENCY_THRESHOLD}ms or timeout).")
-        open(OUTPUT_FILE, "w").close()
-        return
-    print(f"[OK] HTTP baseline: {http_lat}ms")
+        print("[WARN] Continuing with TCP-passed nodes anyway...")
+    else:
+        print(f"[OK] HTTP baseline: {http_lat}ms")
 
     # 5. 地域过滤
     print(f"[GEO] Filtering regions (Asia w/o CN + DE/FR only)...")
