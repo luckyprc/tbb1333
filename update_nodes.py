@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（US解锁版 + HTTP速度测试）
-- 保留美国（US）、日本（JP）、新加坡（SG）、德国（DE）及亚洲其他（不含CN）
-- 增加HTTP层下载速度测试（>500KB/s保留）
-- 目标：YouTube/Gemini/ChatGPT/Claude/Dola 可用
+节点聚合器（20秒极速版）
+- 砍掉HTTP层测速（代理节点非HTTP服务，超时浪费生命）
+- GeoIP查询改为16线程并发
+- 保留美国/US、日本/JP、新加坡/SG、德国/DE及亚洲（不含CN）
+- 只保留TCP延迟<599ms
 """
 
 import base64
@@ -30,10 +31,7 @@ TCP_LATENCY_THRESHOLD = 599
 TCP_TIMEOUT = 2
 DNS_TIMEOUT = 2
 MAX_WORKERS = 64
-
-# HTTP下载速度阈值（KB/s），低于此值视为带宽不足
-HTTP_SPEED_THRESHOLD = 500
-HTTP_SPEED_TEST_SIZE = 1024 * 100  # 读取前100KB计算速度
+GEO_WORKERS = 16  # GeoIP并发线程
 
 ALLOWED_CC = {
     "US", "JP", "KR", "SG", "HK", "TW", "MY", "TH", "VN", "ID", "PH", "IN", "AE",
@@ -56,7 +54,6 @@ ALLOWED_CNAMES = {
     "British Indian Ocean Territory", "Germany", "France"
 }
 
-# 封禁欧洲、南美、澳洲、俄罗斯等（保留US）
 BLOCKED_TLDS = set("""
 .uk .co.uk .gb .ca .au .nz .ru .ua .by
 .nl .it .es .pl .se .no .fi .dk .ch .at .be
@@ -71,7 +68,6 @@ BLOCKED_TLDS = set("""
 .pm .tf .pf .nc .ac .sh .cx .cc .hm .nf
 """.split())
 
-# 放行美国、亚洲、德国、法国
 ALLOWED_TLDS = set("""
 .us .de .fr .jp .kr .sg .hk .tw .my .th .vn .id
 .ph .in .ae .tr .kh .la .mm .bd .lk .np .pk
@@ -214,7 +210,7 @@ def query_ip_region(ip: str) -> Optional[Dict]:
         return None
     try:
         url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,query&lang=zh-CN"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=4)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("status") == "success":
@@ -248,30 +244,6 @@ def tcp_latency_test(host: str, port: int) -> Optional[float]:
         sock.close()
         if result == 0 and elapsed < TCP_LATENCY_THRESHOLD:
             return round(elapsed, 2)
-        return None
-    except Exception:
-        return None
-
-
-def http_speed_test(host: str, port: int) -> Optional[float]:
-    """
-    HTTP层下载速度测试（KB/s）。
-    对节点的host:port直接发起HTTP GET，读取前100KB计算速度。
-    注意：代理节点通常跑vmess/ss/trojan协议，此测试只能捕获
-    带有HTTP伪装或nginx反代的节点，但这些节点通常带宽更好。
-    """
-    if not host or not port:
-        return None
-    try:
-        url = f"http://{host}:{port}/"
-        start = time.time()
-        resp = requests.get(url, timeout=5, stream=True, allow_redirects=False)
-        # 读取前100KB
-        data = resp.raw.read(HTTP_SPEED_TEST_SIZE)
-        elapsed = time.time() - start
-        if elapsed > 0 and len(data) > 100:  # 至少收到100字节
-            speed_kbps = (len(data) / 1024) / elapsed
-            return round(speed_kbps, 2)
         return None
     except Exception:
         return None
@@ -326,38 +298,23 @@ def get_source_urls() -> List[str]:
     today = get_today_str()
     year = time.strftime("%Y", time.localtime())
     month = time.strftime("%m", time.localtime())
-    
     urls = [src.replace("{date}", today) for src in SOURCES]
-    
     for i in range(5):
         urls.append(f"https://node.freeclashnode.com/uploads/{year}/{month}/{i}-{today}.txt")
-    
     return urls
 
 
-def process_single_node(node: str) -> Optional[Tuple[str, float, float, str, Optional[str]]]:
-    """
-    单节点完整处理：DNS解析 -> TCP延迟 -> HTTP速度
-    返回: (node, tcp_lat, http_speed, host, ip) 或 None
-    """
+def process_single_node(node: str) -> Optional[Tuple[str, float, str, Optional[str]]]:
     host = extract_host_from_node(node)
     port = extract_port_from_node(node)
     if not host or not port:
         return None
-    
-    # DNS解析
     ip = get_ip_from_host(host)
     target = ip or host
-    
-    # TCP延迟测试
-    tcp_lat = tcp_latency_test(target, port)
-    if tcp_lat is None:
+    lat = tcp_latency_test(target, port)
+    if lat is None:
         return None
-    
-    # HTTP下载速度测试（对存活节点测带宽）
-    http_speed = http_speed_test(host, port)
-    
-    return (node, tcp_lat, http_speed, host, ip)
+    return (node, lat, host, ip)
 
 
 def main():
@@ -370,14 +327,9 @@ def main():
         # 1. 抓取
         all_nodes: List[str] = []
         for url in get_source_urls():
-            print(f"[FETCH] {url}")
             content = fetch_url(url)
             if content:
-                nodes = parse_subscribe_content(content)
-                print(f"  -> Got {len(nodes)} nodes")
-                all_nodes.extend(nodes)
-            else:
-                print(f"  -> Failed or empty")
+                all_nodes.extend(parse_subscribe_content(content))
 
         print(f"[1] Fetch: {len(all_nodes)}")
         if not all_nodes:
@@ -398,76 +350,76 @@ def main():
         
         print(f"[2] Dedup: {len(unique_nodes)}")
 
-        # 3. 并发：DNS + TCP + HTTP速度
-        passed_nodes: List[Tuple[str, float, float, str, Optional[str]]] = []
-        
-        print(f"[3] Testing {len(unique_nodes)} nodes...")
+        # 3. 并发DNS+TCP（64线程）
+        tcp_passed: List[Tuple[str, float, str, Optional[str]]] = []
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(process_single_node, node): node for node in unique_nodes}
             for future in as_completed(futures):
                 try:
                     result = future.result()
                     if result:
-                        passed_nodes.append(result)
+                        tcp_passed.append(result)
                 except Exception:
                     pass
         
-        print(f"[3] TCP ok: {len(passed_nodes)}")
+        print(f"[3] TCP ok: {len(tcp_passed)}")
+        if not tcp_passed:
+            open(OUTPUT_FILE, "w").close()
+            return
 
-        # 4. 地域过滤
-        allowed_nodes: List[Tuple[str, float, float]] = []  # (node, tcp_lat, http_speed)
-        pending: List[Tuple[str, float, float, str, Optional[str]]] = []
+        # 4. 地域过滤：TLD硬规则 + GeoIP并发查询
+        allowed_nodes: List[Tuple[str, float]] = []
+        pending: List[Tuple[str, float, str, Optional[str]]] = []
         
-        for node, tcp_lat, http_speed, host, ip in passed_nodes:
+        for node, lat, host, ip in tcp_passed:
             tld_result = check_tld(host)
             if tld_result is True:
-                allowed_nodes.append((node, tcp_lat, http_speed))
+                allowed_nodes.append((node, lat))
                 continue
             elif tld_result is False:
                 continue
-            pending.append((node, tcp_lat, http_speed, host, ip))
+            pending.append((node, lat, host, ip))
         
         if pending:
             print(f"[4] GeoIP: {len(pending)} pending...")
-            cache: Dict[str, Optional[Dict]] = {}
-            for node, tcp_lat, http_speed, host, ip in pending:
-                if not ip:
-                    continue
-                data = cache.get(ip)
-                if data is None and ip not in cache:
-                    data = query_ip_region(ip)
-                    cache[ip] = data
+            
+            # 先收集所有需要查询的唯一IP
+            unique_ips: Set[str] = set()
+            ip_to_nodes: Dict[str, List[Tuple[str, float, str]]] = {}
+            for node, lat, host, ip in pending:
+                if ip:
+                    unique_ips.add(ip)
+                    ip_to_nodes.setdefault(ip, []).append((node, lat, host))
+            
+            # 并发查询ip-api.com（16线程）
+            region_cache: Dict[str, Optional[Dict]] = {}
+            with ThreadPoolExecutor(max_workers=GEO_WORKERS) as executor:
+                future_map = {executor.submit(query_ip_region, ip): ip for ip in unique_ips}
+                for future in as_completed(future_map):
+                    ip = future_map[future]
+                    try:
+                        region_cache[ip] = future.result()
+                    except Exception:
+                        region_cache[ip] = None
+            
+            # 根据查询结果过滤
+            for ip, nodes_list in ip_to_nodes.items():
+                data = region_cache.get(ip)
                 if data and is_allowed_region(data):
-                    allowed_nodes.append((node, tcp_lat, http_speed))
+                    for node, lat, host in nodes_list:
+                        allowed_nodes.append((node, lat))
         
         print(f"[4] Region ok: {len(allowed_nodes)}")
 
-        # 5. 按HTTP速度排序（速度高的在前），无速度数据的按TCP延迟排
-        # 排序策略：有http_speed的优先，且>500KB/s的排最前
-        def sort_key(item):
-            node, tcp_lat, http_speed = item
-            if http_speed and http_speed >= HTTP_SPEED_THRESHOLD:
-                return (0, -http_speed)  # 第一梯队：高带宽，按速度降序
-            elif http_speed:
-                return (1, -http_speed)  # 第二梯队：有速度但不高
-            else:
-                return (2, tcp_lat)      # 第三梯队：只有TCP延迟
-        
-        allowed_nodes.sort(key=sort_key)
-
-        # 6. 输出
+        # 5. 输出（按TCP延迟升序）
         if allowed_nodes:
-            node_text = "\n".join([n for n, _, _ in allowed_nodes])
+            allowed_nodes.sort(key=lambda x: x[1])
+            node_text = "\n".join([n for n, _ in allowed_nodes])
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 f.write(node_text)
-            # 打印前5个节点信息
-            for i, (node, lat, speed) in enumerate(allowed_nodes[:5], 1):
-                h = extract_host_from_node(node)
-                flag = "🚀" if speed and speed >= HTTP_SPEED_THRESHOLD else ""
-                print(f"  TOP{i}: {h} | TCP:{lat}ms | HTTP:{speed}KB/s {flag}")
             print(f"[OK] Output: {len(allowed_nodes)} nodes")
         else:
-            print("[WARN] No nodes passed all filters.")
+            print("[WARN] No nodes in allowed regions.")
             open(OUTPUT_FILE, "w").close()
 
         print(f"[DONE] {round(time.time() - t_start, 1)}s")
