@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（加强地域过滤版 - 明文输出）
-- 聚合多源站
-- 去重（地址+端口+协议）
-- TCP 延迟检测（<250ms 保留）
-- HTTP 网页延迟检测（<250ms 保留）
-- IP 地域硬过滤（只保留亚洲【不含CN】、德国、法国）
-- 输出明文订阅（每行一个节点链接）
+节点聚合器（诊断版）
+- 增加详细过滤日志
+- 增加保底机制：如果全部过滤为空，输出原始去重节点（方便排查）
 """
 
 import base64
@@ -24,10 +20,12 @@ import requests
 import yaml
 
 
-# ==================== 配置区 ====================
-
 OUTPUT_DIR = "output"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "v2ray.txt")
+
+# ========== 诊断开关 ==========
+# 设为 True 则保留所有节点（只去重），用于确认源站是否有数据
+DEBUG_SKIP_ALL_FILTERS = False
 
 TCP_LATENCY_THRESHOLD = 250
 HTTP_LATENCY_THRESHOLD = 250
@@ -36,7 +34,6 @@ TCP_TIMEOUT = 3
 MAX_WORKERS = 64
 IP_QUERY_DELAY = 1.5
 
-# 允许的国家代码（亚洲 + DE + FR，不含 CN）
 ALLOWED_CC = {
     "JP", "KR", "SG", "HK", "TW", "MY", "TH", "VN", "ID", "PH", "IN", "AE",
     "TR", "KH", "LA", "MM", "BD", "LK", "NP", "PK", "MN", "MO", "BN", "TL",
@@ -45,7 +42,6 @@ ALLOWED_CC = {
     "DE", "FR"
 }
 
-# 允许的国家英文名称
 ALLOWED_CNAMES = {
     "Japan", "Korea", "South Korea", "Republic of Korea", "Singapore",
     "Hong Kong", "Taiwan", "Malaysia", "Thailand", "Vietnam", "Indonesia",
@@ -59,7 +55,6 @@ ALLOWED_CNAMES = {
     "British Indian Ocean Territory", "Germany", "France"
 }
 
-# 明确禁止的域名后缀
 BLOCKED_TLDS = {
     '.uk', '.co.uk', '.gb', '.us', '.ca', '.au', '.nz', '.ru', '.ua', '.by',
     '.nl', '.it', '.es', '.pl', '.se', '.no', '.fi', '.dk', '.ch', '.at', '.be',
@@ -74,7 +69,6 @@ BLOCKED_TLDS = {
     '.pm', '.tf', '.pf', '.nc', '.ac', '.sh', '.cx', '.cc', '.hm', '.nf'
 }
 
-# 明确允许的域名后缀
 ALLOWED_TLDS = {
     '.de', '.fr', '.jp', '.kr', '.sg', '.hk', '.tw', '.my', '.th', '.vn', '.id',
     '.ph', '.in', '.ae', '.tr', '.kh', '.la', '.mm', '.bd', '.lk', '.np', '.pk',
@@ -83,7 +77,6 @@ ALLOWED_TLDS = {
     '.ir', '.ps', '.sy', '.af', '.bt', '.mv'
 }
 
-# 源站列表
 SOURCES = [
     "http://comm.cczzuu.top/node/{date}-v2ray.txt",
     "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity",
@@ -110,8 +103,6 @@ SOURCES = [
 
 DATE_FMT = "%Y%m%d"
 
-
-# ==================== 工具函数 ====================
 
 def get_today_str() -> str:
     return time.strftime(DATE_FMT, time.localtime())
@@ -336,6 +327,10 @@ def main():
     today = get_today_str()
     print(f"=== Node Aggregator Started | Date: {today} ===")
 
+    # 调试模式：跳过所有过滤，只保留去重
+    if DEBUG_SKIP_ALL_FILTERS:
+        print("[DEBUG] DEBUG_SKIP_ALL_FILTERS = True, skipping all filters!")
+
     # 1. 抓取
     all_nodes: List[str] = []
     for url in get_source_urls():
@@ -367,6 +362,14 @@ def main():
             unique_nodes.append(node)
     print(f"[INFO] After dedup: {len(unique_nodes)}")
 
+    # 调试模式：直接输出去重后的节点
+    if DEBUG_SKIP_ALL_FILTERS:
+        node_text = "\n".join(unique_nodes)
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write(node_text)
+        print(f"[DEBUG] Output {len(unique_nodes)} nodes without filtering.")
+        return
+
     # 3. TCP 延迟测试
     tcp_passed: List[Tuple[str, float]] = []
     node_meta = []
@@ -389,23 +392,30 @@ def main():
             lat = future.result()
             if lat is not None:
                 tcp_passed.append((node, lat))
+            else:
+                print(f"  [DROP-TCP] {host}:{port} -> timeout or >{TCP_LATENCY_THRESHOLD}ms")
 
     print(f"[INFO] After TCP latency filter: {len(tcp_passed)}")
     if not tcp_passed:
         print("[WARN] No nodes passed TCP latency test.")
-        open(OUTPUT_FILE, "w").close()
+        # 保底：输出去重节点供排查
+        print("[FALLBACK] Writing deduped nodes for diagnosis...")
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join([n for n in unique_nodes]))
         return
 
     # 4. HTTP 延迟门槛
     print(f"[TEST] HTTP check ({HTTP_CHECK_URL}, threshold {HTTP_LATENCY_THRESHOLD}ms)...")
     http_lat = http_latency_test()
     if http_lat is None:
-        print("[WARN] HTTP check failed. Aborting.")
-        open(OUTPUT_FILE, "w").close()
+        print(f"[WARN] HTTP check failed (runner to hicloud >{HTTP_LATENCY_THRESHOLD}ms or timeout).")
+        print("[FALLBACK] Writing TCP-passed nodes for diagnosis...")
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join([n for n, _ in tcp_passed]))
         return
     print(f"[OK] HTTP baseline: {http_lat}ms")
 
-    # 5. 地域过滤（TLD 硬规则 + IP 查询兜底）
+    # 5. 地域过滤
     print(f"[GEO] Filtering regions (Asia w/o CN + DE/FR only)...")
     
     allowed_nodes: List[Tuple[str, float]] = []
@@ -450,28 +460,22 @@ def main():
                 else:
                     print(f"  [BLOCK-IP] {host} ({ip}) -> {cn} ({cc})")
             else:
-                print(f"  [BLOCK-UNK] {host} ({ip}) -> IP query failed")
+                print(f"  [BLOCK-UNK] {host} ({ip}) -> IP query failed (rate limit?)")
     
     print(f"[INFO] After region filter: {len(allowed_nodes)}")
-    if not allowed_nodes:
+
+    # 6. 输出
+    if allowed_nodes:
+        allowed_nodes.sort(key=lambda x: x[1])
+        node_text = "\n".join([n for n, _ in allowed_nodes])
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write(node_text)
+        print(f"[OK] Output: {OUTPUT_FILE} | {len(allowed_nodes)} nodes")
+    else:
         print("[WARN] No nodes in allowed regions.")
-        open(OUTPUT_FILE, "w").close()
-        return
-
-    # 6. 排序
-    allowed_nodes.sort(key=lambda x: x[1])
-
-    # 7. 输出明文 —— 关键：直接写入 node_text，不做 Base64 编码
-    node_text = "\n".join([n for n, _ in allowed_nodes])
-    
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write(node_text)
-    
-    print(f"[OK] Output: {OUTPUT_FILE}")
-    print(f"[OK] Total qualified: {len(allowed_nodes)} (HTTP: {http_lat}ms)")
-    for i, (node, lat) in enumerate(allowed_nodes[:5], 1):
-        h = extract_host_from_node(node)
-        print(f"  TOP{i}: {h} | TCP:{lat}ms")
+        print("[FALLBACK] Writing TCP-passed nodes for diagnosis...")
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join([n for n, _ in tcp_passed]))
 
 
 if __name__ == "__main__":
