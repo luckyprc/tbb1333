@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器（20秒极速版）
-- 砍掉HTTP层测速（代理节点非HTTP服务，超时浪费生命）
-- GeoIP查询改为16线程并发
-- 保留美国/US、日本/JP、新加坡/SG、德国/DE及亚洲（不含CN）
-- 只保留TCP延迟<599ms
+节点聚合器（纯TLD极速版）
+- 无GeoIP查询，无ip-api.com
+- TLD硬规则：明确放行/封禁，其余.com/.net/.org等通用后缀直接放行
+- DNS+TCP 64线程并发
+- 目标：10-15秒完成
 """
 
 import base64
@@ -31,36 +31,15 @@ TCP_LATENCY_THRESHOLD = 599
 TCP_TIMEOUT = 2
 DNS_TIMEOUT = 2
 MAX_WORKERS = 64
-GEO_WORKERS = 16  # GeoIP并发线程
 
-ALLOWED_CC = {
-    "US", "JP", "KR", "SG", "HK", "TW", "MY", "TH", "VN", "ID", "PH", "IN", "AE",
-    "TR", "KH", "LA", "MM", "BD", "LK", "NP", "PK", "MN", "MO", "BN", "TL",
-    "KZ", "KG", "UZ", "TJ", "TM", "GE", "AM", "AZ", "CY", "IL", "JO", "KW",
-    "LB", "OM", "QA", "SA", "YE", "BH", "IQ", "IR", "PS", "SY", "AF", "BT", "MV", "IO",
-    "DE", "FR"
-}
-
-ALLOWED_CNAMES = {
-    "United States", "Japan", "Korea", "South Korea", "Republic of Korea", "Singapore",
-    "Hong Kong", "Taiwan", "Malaysia", "Thailand", "Vietnam", "Indonesia",
-    "Philippines", "India", "United Arab Emirates", "Turkey", "Cambodia",
-    "Laos", "Myanmar", "Burma", "Bangladesh", "Sri Lanka", "Nepal", "Pakistan",
-    "Mongolia", "Macao", "Macau", "Brunei", "Timor-Leste", "East Timor",
-    "Kazakhstan", "Kyrgyzstan", "Uzbekistan", "Tajikistan", "Turkmenistan",
-    "Georgia", "Armenia", "Azerbaijan", "Cyprus", "Israel", "Jordan", "Kuwait",
-    "Lebanon", "Oman", "Qatar", "Saudi Arabia", "Yemen", "Bahrain", "Iraq",
-    "Iran", "Palestine", "Syria", "Afghanistan", "Bhutan", "Maldives",
-    "British Indian Ocean Territory", "Germany", "France"
-}
-
+# 明确封禁的TLD（欧洲、南美、澳洲、俄罗斯等）
 BLOCKED_TLDS = set("""
 .uk .co.uk .gb .ca .au .nz .ru .ua .by
 .nl .it .es .pl .se .no .fi .dk .ch .at .be
 .ie .pt .cz .hu .ro .sk .bg .hr .si .lt .lv
 .ee .lu .mt .is .li .mc .sm .va .ad .mx .br
 .ar .cl .co .pe .ve .ec .uy .py .bo .sr .gy
-.gf .fk .gs .io .tk .ml .ga .cf .gq .st .sc
+.gf .fk .gs .tk .ml .ga .cf .gq .st .sc
 .lc .vc .ag .dm .kn .bb .gd .tt .jm .ht .bs
 .cu .do .pr .vi .gu .mp .as .fm .pw .mh .nr
 .ki .tv .to .ws .sb .vu .fj .pg .ck .nu .wf
@@ -68,6 +47,7 @@ BLOCKED_TLDS = set("""
 .pm .tf .pf .nc .ac .sh .cx .cc .hm .nf
 """.split())
 
+# 明确放行的TLD（美国、亚洲、德国、法国）
 ALLOWED_TLDS = set("""
 .us .de .fr .jp .kr .sg .hk .tw .my .th .vn .id
 .ph .in .ae .tr .kh .la .mm .bd .lk .np .pk
@@ -187,9 +167,15 @@ def get_ip_from_host(host: str) -> Optional[str]:
         socket.setdefaulttimeout(old)
 
 
-def check_tld(host: str) -> Optional[bool]:
+def check_tld(host: str) -> bool:
+    """
+    TLD硬规则：
+    - 命中BLOCKED → False（丢弃）
+    - 命中ALLOWED → True（放行）
+    - 其余.com/.net/.org/.xyz/.cloud/.top/.world/.ltd等通用后缀 → True（放行，保留美国节点）
+    """
     if not host:
-        return None
+        return False
     h = host.lower()
     for tld in BLOCKED_TLDS:
         if h.endswith(tld):
@@ -197,39 +183,8 @@ def check_tld(host: str) -> Optional[bool]:
     for tld in ALLOWED_TLDS:
         if h.endswith(tld):
             return True
-    return None
-
-
-def query_ip_region(ip: str) -> Optional[Dict]:
-    if not ip:
-        return None
-    if ip.startswith(("10.", "172.16.", "172.17.", "172.18.", "172.19.",
-                      "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
-                      "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
-                      "172.30.", "172.31.", "192.168.", "127.")):
-        return None
-    try:
-        url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,query&lang=zh-CN"
-        resp = requests.get(url, timeout=4)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") == "success":
-                return data
-    except Exception:
-        pass
-    return None
-
-
-def is_allowed_region(region_data: Optional[Dict]) -> bool:
-    if not region_data:
-        return False
-    cc = region_data.get("countryCode", "")
-    cn = region_data.get("country", "")
-    if cc in ALLOWED_CC:
-        return True
-    if cn in ALLOWED_CNAMES:
-        return True
-    return False
+    # 通用后缀（.com/.net/.org/.xyz/.cloud/.shop/.online/.live/.site/.space等）直接放行
+    return True
 
 
 def tcp_latency_test(host: str, port: int) -> Optional[float]:
@@ -304,7 +259,11 @@ def get_source_urls() -> List[str]:
     return urls
 
 
-def process_single_node(node: str) -> Optional[Tuple[str, float, str, Optional[str]]]:
+def process_single_node(node: str) -> Optional[Tuple[str, float, str]]:
+    """
+    DNS解析 -> TCP测试
+    返回: (node, latency, host) 或 None
+    """
     host = extract_host_from_node(node)
     port = extract_port_from_node(node)
     if not host or not port:
@@ -314,7 +273,7 @@ def process_single_node(node: str) -> Optional[Tuple[str, float, str, Optional[s
     lat = tcp_latency_test(target, port)
     if lat is None:
         return None
-    return (node, lat, host, ip)
+    return (node, lat, host)
 
 
 def main():
@@ -322,7 +281,7 @@ def main():
         t_start = time.time()
         ensure_dir(OUTPUT_DIR)
         today = get_today_str()
-        print(f"=== Start | {today} ===")
+        print(f"=== Start | {today} ===", flush=True)
 
         # 1. 抓取
         all_nodes: List[str] = []
@@ -331,7 +290,7 @@ def main():
             if content:
                 all_nodes.extend(parse_subscribe_content(content))
 
-        print(f"[1] Fetch: {len(all_nodes)}")
+        print(f"[1] Fetch: {len(all_nodes)}", flush=True)
         if not all_nodes:
             open(OUTPUT_FILE, "w").close()
             return
@@ -348,10 +307,10 @@ def main():
                 seen.add(fp)
                 unique_nodes.append(node)
         
-        print(f"[2] Dedup: {len(unique_nodes)}")
+        print(f"[2] Dedup: {len(unique_nodes)}", flush=True)
 
-        # 3. 并发DNS+TCP（64线程）
-        tcp_passed: List[Tuple[str, float, str, Optional[str]]] = []
+        # 3. 并发DNS+TCP
+        tcp_passed: List[Tuple[str, float, str]] = []
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(process_single_node, node): node for node in unique_nodes}
             for future in as_completed(futures):
@@ -362,54 +321,22 @@ def main():
                 except Exception:
                     pass
         
-        print(f"[3] TCP ok: {len(tcp_passed)}")
+        print(f"[3] TCP ok: {len(tcp_passed)}", flush=True)
         if not tcp_passed:
             open(OUTPUT_FILE, "w").close()
             return
 
-        # 4. 地域过滤：TLD硬规则 + GeoIP并发查询
+        # 4. 纯TLD硬过滤（无GeoIP，无ip-api.com）
         allowed_nodes: List[Tuple[str, float]] = []
-        pending: List[Tuple[str, float, str, Optional[str]]] = []
+        dropped = 0
         
-        for node, lat, host, ip in tcp_passed:
-            tld_result = check_tld(host)
-            if tld_result is True:
+        for node, lat, host in tcp_passed:
+            if check_tld(host):
                 allowed_nodes.append((node, lat))
-                continue
-            elif tld_result is False:
-                continue
-            pending.append((node, lat, host, ip))
+            else:
+                dropped += 1
         
-        if pending:
-            print(f"[4] GeoIP: {len(pending)} pending...")
-            
-            # 先收集所有需要查询的唯一IP
-            unique_ips: Set[str] = set()
-            ip_to_nodes: Dict[str, List[Tuple[str, float, str]]] = {}
-            for node, lat, host, ip in pending:
-                if ip:
-                    unique_ips.add(ip)
-                    ip_to_nodes.setdefault(ip, []).append((node, lat, host))
-            
-            # 并发查询ip-api.com（16线程）
-            region_cache: Dict[str, Optional[Dict]] = {}
-            with ThreadPoolExecutor(max_workers=GEO_WORKERS) as executor:
-                future_map = {executor.submit(query_ip_region, ip): ip for ip in unique_ips}
-                for future in as_completed(future_map):
-                    ip = future_map[future]
-                    try:
-                        region_cache[ip] = future.result()
-                    except Exception:
-                        region_cache[ip] = None
-            
-            # 根据查询结果过滤
-            for ip, nodes_list in ip_to_nodes.items():
-                data = region_cache.get(ip)
-                if data and is_allowed_region(data):
-                    for node, lat, host in nodes_list:
-                        allowed_nodes.append((node, lat))
-        
-        print(f"[4] Region ok: {len(allowed_nodes)}")
+        print(f"[4] TLD pass: {len(allowed_nodes)} | dropped: {dropped}", flush=True)
 
         # 5. 输出（按TCP延迟升序）
         if allowed_nodes:
@@ -417,12 +344,12 @@ def main():
             node_text = "\n".join([n for n, _ in allowed_nodes])
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 f.write(node_text)
-            print(f"[OK] Output: {len(allowed_nodes)} nodes")
+            print(f"[OK] Output: {len(allowed_nodes)} nodes", flush=True)
         else:
-            print("[WARN] No nodes in allowed regions.")
+            print("[WARN] No nodes passed TLD filter.", flush=True)
             open(OUTPUT_FILE, "w").close()
 
-        print(f"[DONE] {round(time.time() - t_start, 1)}s")
+        print(f"[DONE] {round(time.time() - t_start, 1)}s", flush=True)
         
     except Exception:
         traceback.print_exc()
