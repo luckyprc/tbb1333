@@ -1,0 +1,34 @@
+name: Aggregate Proxy Nodes
+
+on:
+  schedule:
+    # 北京时间每天 10:00 = UTC 02:00
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run aggregator
+        run: python update_nodes.py
+
+      - name: Commit and push
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update nodes [$(date +%Y%m%d)]"
+          file_pattern: 'output/*.txt'
