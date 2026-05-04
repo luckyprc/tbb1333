@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+# 消除 Node.js 20 deprecated 警告，强制使用 Node 24 运行环境
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -25,7 +29,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run aggregator
-        run: python update_nodes.py
+        # -u 强制 Python 无缓冲模式，print 实时输出到日志，避免 60 秒沉默
+        run: python -u update_nodes.py
 
       - name: Commit and push
         uses: stefanzweifel/git-auto-commit-action@v5
