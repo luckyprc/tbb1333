@@ -23,17 +23,17 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
 
       - name: Install dependencies
         run: |
-          pip install aiohttp aiohttp-socks asyncio-dns
+          pip install aiohttp aiodns
 
       - name: Fetch & Verify Proxies
         run: python scripts/fetch_proxies.py
