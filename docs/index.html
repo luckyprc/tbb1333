@@ -1,1 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>在线 PAC 代理文件</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
+        h1 { border-bottom: 2px solid #0366d6; padding-bottom: 10px; }
+        code { background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-family: "SFMono-Regular", Consolas, monospace; }
+        pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; }
+        .box { background: #fff; border: 1px solid #e1e4e8; border-radius: 6px; padding: 16px; margin: 16px 0; }
+        .label { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+        .ok { background: #d4edda; color: #155724; }
+        .warn { background: #fff3cd; color: #856404; }
+        a { color: #0366d6; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e1e4e8; }
+        th { font-weight: 600; background: #f6f8fa; }
+    </style>
+</head>
+<body>
+    <h1>🌐 在线 PAC 代理文件</h1>
+    <p>本页面由 GitHub Actions 自动构建部署，每 3 小时（北京时间 <b>7:00 / 10:00 / 13:00 / 16:00 / 19:00</b>）从公开代理池抓取并验证可用代理，生成 PAC 文件。</p>
 
+    <div class="box">
+        <h3>📥 PAC 文件地址（直接复制到浏览器或 SwitchProxy）</h3>
+        <pre id="pac-url"></pre>
+        <p><span class="label ok">自动更新</span><span class="label ok">HTTP + SOCKS5</span><span class="label ok">多代理 fallback</span></p>
+    </div>
+
+    <div class="box">
+        <h3>⚙️ 使用方式</h3>
+        <table>
+            <tr><th>平台/工具</th><th>设置路径</th></tr>
+            <tr><td>Chrome + SwitchyOmega/SwitchProxy</td><td>选项 → 情景模式 → 自动切换 → PAC 地址</td></tr>
+            <tr><td>Windows 系统代理</td><td>设置 → 网络和 Internet → 代理 → 使用设置脚本</td></tr>
+            <tr><td>macOS</td><td>系统设置 → 网络 → 详细信息 → 代理 → 自动代理配置</td></tr>
+            <tr><td>Firefox</td><td>设置 → 网络设置 → 自动代理配置 URL</td></tr>
+            <tr><td>移动端 (WiFi)</td><td>WiFi 详情 → 代理 → 自动 → 填入 PAC URL</td></tr>
+        </table>
+    </div>
+
+    <div class="box">
+        <h3>📊 当前代理状态</h3>
+        <p>最近一次更新时间：<span id="update-time">加载中...</span></p>
+        <p>HTTP 代理数：<span id="http-count">加载中...</span></p>
+        <p>SOCKS5 代理数：<span id="socks5-count">加载中...</span></p>
+        <p><a href="proxies.json" target="_blank">查看原始 JSON 数据</a> | <a href="proxy.pac" target="_blank">查看 PAC 文件源码</a></p>
+    </div>
+
+    <div class="box">
+        <h3>📝 规则说明</h3>
+        <ul>
+            <li>国内域名（.cn、百度、淘宝等）及局域网地址 → <b>DIRECT 直连</b></li>
+            <li>其他地址 → 依次尝试 <b>HTTP 代理 → SOCKS5 代理 → DIRECT</b></li>
+            <li>代理全部失效时自动回退到直连，避免断网</li>
+            <li>PAC 中<b>不包含 127.0.0.1</b>，所有代理均为公网可用地址</li>
+        </ul>
+    </div>
+
+    <footer style="margin-top:40px; padding-top:20px; border-top:1px solid #e1e4e8; color:#666; font-size:14px;">
+        <p>Powered by GitHub Actions & GitHub Pages | 代理来源于公开免费节点池，仅供技术研究与测试使用</p>
+    </footer>
+
+    <script>
+        // 自动推断当前 Pages 域名
+        const pacUrl = location.origin + location.pathname.replace(/index\.html$/, '') + 'proxy.pac';
+        document.getElementById('pac-url').textContent = pacUrl;
+
+        // 尝试加载 proxies.json 显示状态
+        fetch('proxies.json?t=' + Date.now())
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('http-count').textContent = (data.http || []).length;
+                document.getElementById('socks5-count').textContent = (data.socks5 || []).length;
+            })
+            .catch(() => {
+                document.getElementById('http-count').textContent = 'N/A';
+                document.getElementById('socks5-count').textContent = 'N/A';
+            });
+
+        // 显示当前时间作为参考
+        const now = new Date();
+        const bj = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Shanghai"}));
+        document.getElementById('update-time').textContent = bj.toLocaleString('zh-CN');
+    </script>
+</body>
+</html>
