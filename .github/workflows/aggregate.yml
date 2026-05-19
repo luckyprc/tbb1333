@@ -1,0 +1,62 @@
+name: Aggregate and Deploy
+
+on:
+  schedule:
+    - cron: '0 1,5,9,13,17,21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  LATENCY_TIMEOUT: 2
+  MAX_LATENCY_MS: 2000
+  GEO_COUNTRIES: "HK,TW,JP,SG,MY,KR,US,DE,FR,NL,GB"
+  REAL_TEST_URL: "https://www.google.com/generate_204"
+  REAL_TEST_TIMEOUT: 5
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyyaml requests maxminddb
+
+      - name: Download GeoLite2 DB
+        run: |
+          wget -qO GeoLite2-Country.mmdb             "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"             || wget -qO GeoLite2-Country.mmdb             "https://github.com/alecthw/mmdb_china_ip_list/raw/release/Country.mmdb"
+          ls -lh GeoLite2-Country.mmdb
+
+      - name: Run aggregation
+        run: |
+          mkdir -p output
+          python .github/scripts/aggregate.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
+
+      - name: Commit outputs to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/ || true
+          git diff --cached --quiet || git commit -m "update: $(date -u +%Y-%m-%d_%H:%M)"
+          git push || true
