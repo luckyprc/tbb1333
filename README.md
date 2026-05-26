@@ -1,3 +1,7 @@
+vless://8f98e7f0-5848-45f0-81f5-0aa9b7a35680@www.visa.com.sg:443?encryption=none&security=tls&sni=bas5672.ccwu.cc&insecure=0&allowInsecure=0&type=ws&host=bas5672.ccwu.cc&path=%2Fvless#Railway-Singbox
+
+
+
 # Auto PAC Proxy
 
 由 GitHub Actions 驱动的全自动在线 PAC 代理文件生成器。
