@@ -1,25 +1,25 @@
 {
-  "timestamp": "2026-07-30T07:29:11.753896",
-  "raw_fetched": 116,
-  "parsed": 116,
-  "deduped": 102,
-  "alive": 70,
-  "geo_passed": 37,
+  "timestamp": "2026-07-30T10:59:24.717551",
+  "raw_fetched": 188,
+  "parsed": 188,
+  "deduped": 127,
+  "alive": 80,
+  "geo_passed": 46,
   "final": 50,
   "tier_distribution": {
-    "A": 33,
+    "A": 35,
     "B": 14,
-    "C": 3
+    "C": 1
   },
   "countries": {
     "US": 25,
-    "NL": 2,
-    "DE": 5,
-    "GB": 3,
+    "DE": 7,
+    "GB": 4,
     "SG": 2,
-    "": 11,
-    "CZ": 1,
-    "RU": 1
+    "NL": 4,
+    "": 4,
+    "FR": 1,
+    "KR": 3
   },
   "sources": [
     "https://v2rayse.com/fs/public/{date}/free-node-share-0800.txt",
