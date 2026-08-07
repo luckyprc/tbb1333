@@ -1,21 +1,21 @@
 {
-  "timestamp": "2026-08-07T06:05:23.456855",
+  "timestamp": "2026-08-07T09:52:48.297546",
   "raw_fetched": 43,
   "parsed": 43,
-  "deduped": 35,
-  "alive": 21,
-  "geo_passed": 5,
-  "final": 18,
+  "deduped": 36,
+  "alive": 19,
+  "geo_passed": 4,
+  "final": 19,
   "tier_distribution": {
-    "A": 5,
+    "A": 6,
     "B": 7,
     "C": 6
   },
   "countries": {
-    "US": 3,
-    "": 12,
-    "GB": 1,
-    "JP": 1,
+    "US": 2,
+    "NL": 1,
+    "DE": 1,
+    "": 14,
     "SA": 1
   },
   "sources": [
