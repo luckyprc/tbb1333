@@ -1,20 +1,19 @@
 {
-  "timestamp": "2026-08-23T13:25:42.167480",
-  "raw_fetched": 281,
-  "parsed": 281,
-  "deduped": 126,
-  "alive": 106,
+  "timestamp": "2026-08-23T17:13:21.213152",
+  "raw_fetched": 280,
+  "parsed": 280,
+  "deduped": 127,
+  "alive": 104,
   "geo_passed": 77,
   "final": 77,
   "tier_distribution": {
-    "A": 72,
-    "B": 5,
+    "A": 68,
+    "B": 9,
     "C": 0
   },
   "countries": {
-    "US": 73,
-    "NL": 2,
-    "HK": 1,
+    "US": 75,
+    "NL": 1,
     "FR": 1
   },
   "sources": [
