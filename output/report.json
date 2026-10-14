@@ -1,18 +1,18 @@
 {
-  "timestamp": "2026-10-13T19:40:36.841126",
-  "raw_fetched": 3,
-  "parsed": 3,
-  "deduped": 3,
-  "alive": 3,
-  "geo_passed": 2,
-  "final": 3,
+  "timestamp": "2026-10-14T00:02:27.476287",
+  "raw_fetched": 6,
+  "parsed": 6,
+  "deduped": 6,
+  "alive": 5,
+  "geo_passed": 4,
+  "final": 5,
   "tier_distribution": {
-    "A": 2,
-    "B": 1,
+    "A": 3,
+    "B": 2,
     "C": 0
   },
   "countries": {
-    "US": 2,
+    "US": 4,
     "": 1
   },
   "sources": [
